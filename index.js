@@ -10,10 +10,14 @@ let client;
 let db; // This will hold our connected database instance
 
 // --- Middleware ---
-// CORS Configuration: IMPORTANT - Remove the trailing slash from localhost:5173.
-// Ensure your deployed frontend URL also does NOT have a trailing slash here.
+// CORS Configuration: IMPORTANT - This is the corrected line.
+// 'http://localhost:5173' has NO trailing slash.
+// 'https://admin-management-client.vercel.app' has NO trailing slash.
 app.use(cors({
   origin: ['http://localhost:5173', 'https://admin-management-client.vercel.app'] 
+  // If, AFTER all these steps, it still doesn't work, you can temporarily try:
+  // origin: '*' 
+  // But remember to revert to specific origins for security once it's working.
 }));
 
 app.use(express.json()); // Parse JSON request bodies
