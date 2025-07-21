@@ -13,12 +13,7 @@ let db; // This will hold our connected database instance
 // CORS Configuration: IMPORTANT - Remove the trailing slash from localhost:5173.
 // Ensure your deployed frontend URL also does NOT have a trailing slash here.
 app.use(cors({
-  // The origins array should contain the exact URLs that your frontend will be running on.
-  // 'http://localhost:5173' for your local development.
-  // 'https://admin-management-frontend.vercel.app' for your deployed Vercel frontend.
-  origin: ['http://localhost:5173', 'https://admin-management-frontend.vercel.app'] 
-  // If you are still unsure about the frontend Vercel URL, or for broader testing, you can use:
-  // origin: '*' // Temporarily allow all origins for testing. REMEMBER TO CHANGE THIS LATER FOR SECURITY!
+  origin: ['http://localhost:5173', 'https://admin-management-client.vercel.app'] 
 }));
 
 app.use(express.json()); // Parse JSON request bodies
