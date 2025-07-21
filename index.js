@@ -14,7 +14,10 @@ let db; // This will hold our connected database instance
 // 'http://localhost:5173' has NO trailing slash.
 // 'https://admin-management-client.vercel.app' has NO trailing slash.
 app.use(cors({
-  origin: '*' 
+  origin: ['http://localhost:5173', 'https://admin-management-client.vercel.app'] 
+  // If, AFTER all these steps, it still doesn't work, you can temporarily try:
+  // origin: '*' 
+  // But remember to revert to specific origins for security once it's working.
 }));
 
 app.use(express.json()); // Parse JSON request bodies
