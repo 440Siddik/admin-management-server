@@ -1,3 +1,5 @@
 node_modules
 .env
 .vercel
+serviceAccountKey.json
+serviceAccountKey.json.json # Add this specific name too, as per the error
