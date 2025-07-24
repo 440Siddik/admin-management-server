@@ -22,7 +22,6 @@ const serviceAccount = {
     "token_uri": process.env.FIREBASE_TOKEN_URI,
     "auth_provider_x509_cert_url": process.env.FIREBASE_AUTH_PROVIDER_X509_CERT_URL,
     "client_x509_cert_url": process.env.FIREBASE_CLIENT_X509_CERT_URL
-    // OMITTED: "universe_domain" as it's not typically used by Admin SDK init from service account
 };
 
 // Ensure Firebase Admin SDK is initialized only once
@@ -30,7 +29,7 @@ if (!admin.apps.length) {
     admin.initializeApp({
         credential: admin.credential.cert(serviceAccount)
     });
-    console.log("Firebase Admin SDK initialized.");
+    // console.log("Firebase Admin SDK initialized."); // Removed debug log
 }
 
 
@@ -50,7 +49,7 @@ const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster
 // MODIFIED: connectMongoDB function to be idempotent (safe to call multiple times)
 async function connectMongoDB() {
     if (db && client && client.topology && client.topology.isConnected()) {
-        console.log("MongoDB already connected.");
+        // console.log("MongoDB already connected."); // Removed debug log
         return; // Already connected
     }
 
@@ -63,8 +62,7 @@ async function connectMongoDB() {
         client = new MongoClient(uri, {
             serverApi: {
                 version: ServerApiVersion.v1,
-                // MODIFIED: Set strict to false to allow text indexes (or collation indexes)
-                strict: false, // Changed from true to false
+                strict: false,
                 deprecationErrors: true,
             },
         });
@@ -75,12 +73,11 @@ async function connectMongoDB() {
         // Ensure unique index on 'uid' for the 'users' collection
         const usersCollection = db.collection('users');
         await usersCollection.createIndex({ uid: 1 }, { unique: true });
-        console.log("Ensured index on 'users' collection for 'uid'.");
-        // NEW: Indexes for status and role in users collection for filtering
+        // console.log("Ensured index on 'users' collection for 'uid'."); // Removed debug log
         await usersCollection.createIndex({ status: 1 });
-        console.log("Ensured index on 'users' collection for 'status'.");
+        // console.log("Ensured index on 'users' collection for 'status'."); // Removed debug log
         await usersCollection.createIndex({ role: 1 });
-        console.log("Ensured index on 'users' collection for 'role'.");
+        // console.log("Ensured index on 'users' collection for 'role'."); // Removed debug log
 
 
         // MODIFIED: Add collation indexes for userReports collection search fields
@@ -88,28 +85,28 @@ async function connectMongoDB() {
 
         // Add individual indexes with collation for case-insensitive regex efficiency
         await userReportsCollection.createIndex({ name: 1 }, { collation: { locale: 'en', strength: 2 } });
-        console.log("Ensured collation index on 'userReports' collection for 'name'.");
+        // console.log("Ensured collation index on 'userReports' collection for 'name'."); // Removed debug log
 
         await userReportsCollection.createIndex({ facebookLink: 1 }, { collation: { locale: 'en', strength: 2 } });
-        console.log("Ensured collation index on 'userReports' collection for 'facebookLink'.");
+        // console.log("Ensured collation index on 'userReports' collection for 'facebookLink'."); // Removed debug log
 
         await userReportsCollection.createIndex({ phone: 1 }, { collation: { locale: 'en', strength: 2 } });
-        console.log("Ensured collation index on 'userReports' collection for 'phone'.");
+        // console.log("Ensured collation index on 'userReports' collection for 'phone'."); // Removed debug log
 
         // Keep this one if you still filter by status
         await userReportsCollection.createIndex({ status: 1 });
-        console.log("Ensured index on 'userReports' collection for 'status'.");
+        // console.log("Ensured index on 'userReports' collection for 'status'."); // Removed debug log
 
         // New index for soft delete feature
         await userReportsCollection.createIndex({ deletedAt: 1 });
-        console.log("Ensured index on 'userReports' collection for 'deletedAt'.");
+        // console.log("Ensured index on 'userReports' collection for 'deletedAt'."); // Removed debug log
         // NEW: Index for deletedBy field
         await userReportsCollection.createIndex({ deletedBy: 1 });
-        console.log("Ensured index on 'userReports' collection for 'deletedBy'.");
+        // console.log("Ensured index on 'userReports' collection for 'deletedBy'."); // Removed debug log
 
 
         await db.command({ ping: 1 });
-        console.log("Pinged your deployment. You successfully connected to MongoDB!");
+        // console.log("Pinged your deployment. You successfully connected to MongoDB!"); // Removed debug log
 
     } catch (error) {
         console.error("Failed to connect to MongoDB Atlas:", error);
@@ -133,7 +130,7 @@ async function closeMongoDB() {
     if (client && client.topology && client.topology.isConnected()) {
         try {
             await client.close();
-            console.log("MongoDB Atlas connection closed.");
+            // console.log("MongoDB Atlas connection closed."); // Removed debug log
             client = null; // Clear client and db
             db = null;
         } catch (error) {
@@ -168,35 +165,30 @@ async function verifyAuthToken(req, res, next) {
 
 
 // --- Helper function for paginated queries with optional search and dynamic filters ---
-// MODIFIED: Added dynamic query parameter handling for status and role
 async function fetchPaginatedData(collectionName, baseQuery = {}, req, res, includeDeleted = false) {
-    // db is guaranteed to be connected by ensureDbConnected middleware
     try {
         const page = parseInt(req.query.page) || 1;
         const limit = parseInt(req.query.limit) || 25;
         const skip = (page - 1) * limit;
         const searchTerm = req.query.search;
-        const statusFilter = req.query.status; // Get status from query
-        const roleFilter = req.query.role;     // Get role from query
+        const statusFilter = req.query.status;
+        const roleFilter = req.query.role;
 
         const collection = db.collection(collectionName);
-        let queryConditions = { ...baseQuery }; // Start with any base query conditions
+        let queryConditions = { ...baseQuery };
 
-        // IMPORTANT: Exclude soft-deleted reports by default for regular views
-        if (collectionName === 'userReports') { // Only apply deletedAt filter to userReports
+        if (collectionName === 'userReports') {
             if (!includeDeleted) {
-                queryConditions.deletedAt = { $exists: false }; // Only include documents where deletedAt doesn't exist
+                queryConditions.deletedAt = { $exists: false };
             } else {
-                queryConditions.deletedAt = { $exists: true }; // Only include documents where deletedAt exists (trashed items)
+                queryConditions.deletedAt = { $exists: true };
             }
         }
 
-        // Apply status filter if present in query
         if (statusFilter) {
             queryConditions.status = statusFilter;
         }
 
-        // Apply role filter if present in query (supports comma-separated roles)
         if (roleFilter) {
             const roles = roleFilter.split(',').map(r => r.trim());
             if (roles.length > 1) {
@@ -206,43 +198,42 @@ async function fetchPaginatedData(collectionName, baseQuery = {}, req, res, incl
             }
         }
 
-
         if (searchTerm) {
-            const searchRegex = new RegExp(searchTerm, 'i'); // Case-insensitive regex for search term
+            const searchRegex = new RegExp(searchTerm, 'i');
 
-            // Define search fields based on collection type
             let searchFields = [];
             if (collectionName === 'userReports') {
                 searchFields = ['name', 'facebookLink', 'phone'];
             } else if (collectionName === 'users') {
-                searchFields = ['email', 'fbName']; // Assuming users have email and fbName
+                searchFields = ['email', 'fbName'];
             }
 
             if (searchFields.length > 0) {
                 const searchPart = {
                     $or: searchFields.map(field => ({ [field]: { $regex: searchRegex } }))
                 };
-                // Combine existing queryConditions with searchPart
                 queryConditions = { $and: [queryConditions, searchPart] };
             }
         }
 
-        // Apply reporterName exclusion ONLY for userReports collection
-        if (collectionName === 'userReports' && searchTerm) { // Only apply this exclusion if there's a searchTerm for userReports
+        if (collectionName === 'userReports' && searchTerm) {
             const exclusionPart = {
                 $expr: {
-                    $ne: ["$name", "$reporterName"] // $ne compares the values of the two fields
+                    $ne: ["$name", "$reporterName"]
                 }
             };
-            // Combine with existing queryConditions (which might already include searchPart)
             queryConditions = { $and: [queryConditions, exclusionPart] };
         }
+
+        // console.log(`[fetchPaginatedData] Collection: ${collectionName}, includeDeleted: ${includeDeleted}`); // Removed debug log
+        // console.log("[fetchPaginatedData] Initial baseQuery:", baseQuery); // Removed debug log
+        // console.log("[fetchPaginatedData] Final MongoDB Query Conditions:", queryConditions); // Removed debug log
 
 
         const totalCount = await collection.countDocuments(queryConditions);
 
         const data = await collection.find(queryConditions)
-            .sort({ timestamp: -1 }) // Sort by timestamp descending (newest first)
+            .sort({ timestamp: -1 })
             .skip(skip)
             .limit(limit)
             .toArray();
@@ -262,7 +253,6 @@ async function fetchPaginatedData(collectionName, baseQuery = {}, req, res, incl
 }
 
 // --- Middleware for Admin Token Verification and Role Check ---
-// This middleware remains for admin-only routes
 async function verifyAdminToken(req, res, next) {
     const idToken = req.headers.authorization?.split('Bearer ')[1];
 
@@ -274,24 +264,20 @@ async function verifyAdminToken(req, res, next) {
         const decodedToken = await admin.auth().verifyIdToken(idToken);
         req.user = decodedToken;
 
-        // Check for custom claims first for performance
         if (decodedToken.role === 'admin' || decodedToken.role === 'superadmin') {
-            // Assign userProfile from decodedToken for consistency
             req.userProfile = {
                 uid: decodedToken.uid,
                 email: decodedToken.email,
-                fbName: decodedToken.fbName || 'N/A', // Assuming fbName might be in custom claims or from DB if needed
-                status: decodedToken.status || 'approved', // Assuming status might be in custom claims
+                fbName: decodedToken.fbName || 'N/A',
+                status: decodedToken.status || 'approved',
                 role: decodedToken.role
             };
             next();
             return;
         }
 
-        // Fallback to database lookup if custom claims are not present or insufficient
-        console.warn("User role not found in custom claims or insufficient, performing database lookup for role verification.");
+        // console.warn("User role not found in custom claims or insufficient, performing database lookup for role verification."); // Removed debug log
 
-        // ensureDbConnected middleware already ensures db is connected here.
         const usersCollection = db.collection('users');
         const userProfile = await usersCollection.findOne({ uid: decodedToken.uid });
 
@@ -303,7 +289,7 @@ async function verifyAdminToken(req, res, next) {
             return res.status(403).json({ message: 'Access denied: Insufficient privileges. Requires admin role.' });
         }
 
-        req.userProfile = userProfile; // Attach full user profile from DB
+        req.userProfile = userProfile;
         next();
     } catch (error) {
         console.error('Error verifying Firebase ID token or checking role:', error);
@@ -385,7 +371,6 @@ app.delete('/api/userReports/:id', ensureDbConnected, verifyAuthToken, async (re
         const id = req.params.id;
         const requestingUserUid = req.user.uid; // UID of the currently logged-in user
 
-        // NEW: Role check - only 'user' role can soft delete
         const usersCollection = db.collection('users');
         const userProfile = await usersCollection.findOne({ uid: requestingUserUid });
 
@@ -404,18 +389,16 @@ app.delete('/api/userReports/:id', ensureDbConnected, verifyAuthToken, async (re
             return res.status(404).json({ message: 'User report not found.' });
         }
 
-        // IMPORTANT: Check if the requesting user is the reporter of this report
         if (report.reporterId !== requestingUserUid) {
             return res.status(403).json({ message: 'Access denied: You can only move your own reports to trash.' });
         }
 
-        // --- THIS IS THE CRITICAL FIX: Ensure this uses updateOne, not deleteOne ---
         const result = await userReportsCollection.updateOne(
-            { _id: new ObjectId(id) }, // Query by ID
+            { _id: new ObjectId(id) },
             {
                 $set: {
-                    deletedAt: new Date(), // Set the deletion timestamp
-                    deletedBy: requestingUserUid // Store the UID of the user who trashed it
+                    deletedAt: new Date(),
+                    deletedBy: requestingUserUid
                 }
             }
         );
@@ -439,9 +422,8 @@ app.delete('/api/userReports/:id', ensureDbConnected, verifyAuthToken, async (re
 app.delete('/api/admin/userReports/:id', ensureDbConnected, verifyAdminToken, async (req, res) => {
     try {
         const id = req.params.id;
-        const requestingUserRole = req.userProfile.role; // Role from verifyAdminToken middleware
+        const requestingUserRole = req.userProfile.role;
 
-        // Role check - only 'admin' or 'superadmin' role can permanently delete
         if (requestingUserRole !== 'admin' && requestingUserRole !== 'superadmin') {
             return res.status(403).json({ message: 'Access denied: Only administrators can permanently delete reports.' });
         }
@@ -452,7 +434,6 @@ app.delete('/api/admin/userReports/:id', ensureDbConnected, verifyAdminToken, as
 
         const userReportsCollection = db.collection('userReports');
         
-        // Find the report to ensure it exists before attempting deletion
         const report = await userReportsCollection.findOne({ _id: new ObjectId(id) });
         if (!report) {
             return res.status(404).json({ message: 'Report not found.' });
@@ -463,7 +444,6 @@ app.delete('/api/admin/userReports/:id', ensureDbConnected, verifyAdminToken, as
         if (result.deletedCount === 1) {
             res.status(200).json({ message: 'Report permanently deleted successfully.' });
         } else {
-            // This case should ideally not be reached if findOne found the report
             res.status(404).json({ message: 'Report not found or already deleted.' });
         }
 
@@ -476,7 +456,7 @@ app.delete('/api/admin/userReports/:id', ensureDbConnected, verifyAdminToken, as
 
 // MODIFIED: Get active user reports (excluding soft-deleted ones)
 app.get('/api/userReports', ensureDbConnected, async (req, res) => {
-    await fetchPaginatedData('userReports', { deletedAt: { $exists: false } }, req, res, false); // Explicitly exclude deleted
+    await fetchPaginatedData('userReports', { deletedAt: { $exists: false } }, req, res, false);
 });
 
 app.get('/api/suspendedUsers', ensureDbConnected, async (req, res) => {
@@ -496,7 +476,6 @@ app.get('/api/trashedReports', ensureDbConnected, verifyAdminToken, async (req, 
     if (req.userProfile.role !== 'admin' && req.userProfile.role !== 'superadmin') {
         return res.status(403).json({ message: 'Access denied: Only admins can view trashed reports.' });
     }
-    // Fetch only reports that have been soft-deleted
     await fetchPaginatedData('userReports', { deletedAt: { $exists: true } }, req, res, true);
 });
 
@@ -513,12 +492,12 @@ app.patch('/api/trashedReports/:id/restore', ensureDbConnected, verifyAdminToken
         }
 
         const userReportsCollection = db.collection('userReports');
-        const query = { _id: new ObjectId(id), deletedAt: { $exists: true } }; // Ensure it's in trash
+        const query = { _id: new ObjectId(id), deletedAt: { $exists: true } };
 
         const result = await userReportsCollection.updateOne(
             query,
             {
-                $unset: { deletedAt: "", deletedBy: "" } // Remove deletedAt and deletedBy fields
+                $unset: { deletedAt: "", deletedBy: "" }
             }
         );
 
@@ -548,7 +527,7 @@ app.delete('/api/trashedReports/:id/permanent', ensureDbConnected, verifyAdminTo
         }
 
         const userReportsCollection = db.collection('userReports');
-        const query = { _id: new ObjectId(id), deletedAt: { $exists: true } }; // Ensure it's in trash
+        const query = { _id: new ObjectId(id), deletedAt: { $exists: true } };
 
         const result = await userReportsCollection.deleteOne(query);
 
@@ -570,7 +549,7 @@ app.post('/api/trashedReports/bulk-action', ensureDbConnected, verifyAdminToken,
             return res.status(403).json({ message: 'Access denied: Only admins can perform bulk actions on reports.' });
         }
 
-        const { ids, action } = req.body; // action can be 'restore' or 'permanent_delete'
+        const { ids, action } = req.body;
 
         if (!Array.isArray(ids) || ids.length === 0) {
             return res.status(400).json({ message: 'Invalid or empty array of IDs provided.' });
@@ -582,12 +561,11 @@ app.post('/api/trashedReports/bulk-action', ensureDbConnected, verifyAdminToken,
 
         const objectIds = ids.map(id => {
             if (!ObjectId.isValid(id)) {
-                // Return null for invalid IDs to filter them out later
                 console.warn(`Invalid ObjectId in bulk action: ${id}`);
                 return null;
             }
             return new ObjectId(id);
-        }).filter(id => id !== null); // Filter out any nulls from invalid IDs
+        }).filter(id => id !== null);
 
         if (objectIds.length === 0) {
             return res.status(400).json({ message: 'No valid IDs found in the request for bulk action.' });
@@ -636,7 +614,7 @@ app.post('/api/users', ensureDbConnected, async (req, res) => {
 
         const existingUser = await usersCollection.findOne({ uid });
         if (existingUser) {
-            console.log(`User with UID ${uid} already has a profile in MongoDB.`);
+            // console.log(`User with UID ${uid} already has a profile in MongoDB.`); // Removed debug log
             return res.status(200).json({
                 message: 'User profile already exists for this UID.',
                 userProfile: existingUser
@@ -675,11 +653,20 @@ app.get('/api/users/:uid', ensureDbConnected, async (req, res) => {
         const usersCollection = db.collection('users');
         const uid = req.params.uid;
 
+        // FIX: Fetch the user from the database
+        const user = await usersCollection.findOne({ uid: uid });
 
+        // FIX: Check user status and return appropriate message/status
         if (user) {
+            if (user.status === 'pending') {
+                return res.status(403).json({ message: 'Your account is currently pending admin approval. Please wait for an administrator to approve it.' });
+            } else if (user.status === 'rejected') {
+                return res.status(403).json({ message: 'Your account has been rejected by an administrator. Please contact support if you believe this is an error.' });
+            }
+            // If status is 'approved' or any other valid status, return the user
             res.status(200).json(user);
         } else {
-            res.status(404).json({ message: 'User profile not found.' });
+            res.status(404).json({ message: 'User profile not found in database.' });
         }
     } catch (error) {
         console.error('Error fetching user profile by UID:', error);
@@ -691,16 +678,13 @@ app.get('/api/users/:uid', ensureDbConnected, async (req, res) => {
 // --- ADMIN-SPECIFIC ROUTES (Protected by verifyAdminToken) ---
 
 // GET /api/users - Get ALL user profiles (for admin panel display)
-// MODIFIED: This route now dynamically filters by status and role from query parameters
 app.get('/api/users', ensureDbConnected, verifyAdminToken, async (req, res) => {
-    // fetchPaginatedData will now pick up status and role from req.query
     await fetchPaginatedData('users', {}, req, res);
 });
 
 // PATCH /api/users/:uid/status - Update a user's approval status
 app.patch('/api/users/:uid/status', ensureDbConnected, verifyAdminToken, async (req, res) => {
     try {
-        // req.userProfile is available from verifyAdminToken middleware
         if (req.userProfile.role !== 'admin' && req.userProfile.role !== 'superadmin') {
             return res.status(403).json({ message: 'Access denied: Insufficient privileges to change user status.' });
         }
@@ -724,10 +708,6 @@ app.patch('/api/users/:uid/status', ensureDbConnected, verifyAdminToken, async (
         if (result.modifiedCount === 0) {
             return res.status(200).json({ message: 'User status already set to this value or no changes made.' });
         }
-
-        // OPTIONAL: Update Firebase Custom Claims if status change impacts login behavior
-        // If 'status' is also a claim, you'd update it here.
-        // await admin.auth().setCustomUserClaims(uid, { status: status });
 
         res.status(200).json({ message: `User status updated to '${status}' successfully.` });
 
@@ -769,9 +749,8 @@ app.patch('/api/users/:uid/role', ensureDbConnected, verifyAdminToken, async (re
         }
 
         // IMPORTANT: Update Firebase Custom Claims when role changes
-        // This is crucial for the performance optimization in verifyAdminToken
         await admin.auth().setCustomUserClaims(uid, { role: role });
-        console.log(`Updated Firebase custom claims for user ${uid}: role = ${role}`);
+        // console.log(`Updated Firebase custom claims for user ${uid}: role = ${role}`); // Removed debug log
 
         res.status(200).json({ message: `User role updated to '${role}' successfully.` });
 
@@ -805,7 +784,7 @@ app.delete('/api/users/:uid', ensureDbConnected, verifyAdminToken, async (req, r
         // 1. Delete user from Firebase Authentication
         try {
             await admin.auth().deleteUser(uidToDelete);
-            console.log(`Successfully deleted user ${uidToDelete} from Firebase Authentication.`);
+            // console.log(`Successfully deleted user ${uidToDelete} from Firebase Authentication.`); // Removed debug log
         } catch (firebaseError) {
             if (firebaseError.code === 'auth/user-not-found') {
                 console.warn(`User ${uidToDelete} not found in Firebase Auth, proceeding with MongoDB deletion.`);
@@ -818,7 +797,7 @@ app.delete('/api/users/:uid', ensureDbConnected, verifyAdminToken, async (req, r
         // 2. Delete user profile from MongoDB
         const result = await usersCollection.deleteOne({ uid: uidToDelete });
 
-        if (result.deletedCount === 0 && !targetUser) { // targetUser check is if it was found *before* firebase deletion attempt
+        if (result.deletedCount === 0 && !targetUser) {
             return res.status(404).json({ message: 'User profile not found in database and not deleted from Firebase Auth (if it existed).' });
         }
 
@@ -832,31 +811,24 @@ app.delete('/api/users/:uid', ensureDbConnected, verifyAdminToken, async (req, r
 
 
 // --- Server Startup (Conditional for Local vs. Vercel) ---
-module.exports = app; // This is the standard export for Vercel
+module.exports = app;
 
-// Only listen on a port if not in a production (serverless) environment
 if (process.env.NODE_ENV !== 'production') {
     const PORT = process.env.PORT || 5000;
     connectMongoDB().then(() => {
         app.listen(PORT, () => {
-            console.log(`Admin Management Server is running locally on port: ${PORT}`);
+            // console.log(`Admin Management Server is running locally on port: ${PORT}`); // Removed debug log
         });
     }).catch(error => {
         console.error("Failed to start local server due to database connection error:", error);
-        process.exit(1); // Exit if DB connection fails at startup
+        process.exit(1);
     });
 } else {
-    // For Vercel (production), the `module.exports = app;` handles server startup.
-    // The `ensureDbConnected` middleware will handle the database connection
-    // lazily on the first request (cold start) and reuse it for subsequent
-    // "warm" requests within the same serverless instance.
-    console.log("Running in production environment (e.g., Vercel). Serverless function will handle startup.");
+    // console.log("Running in production environment (e.g., Vercel). Serverless function will handle startup."); // Removed debug log
 }
 
 
 // --- Graceful Shutdown (Less critical for serverless, but good for local) ---
-// These are primarily for local development servers. Vercel handles function
-// lifecycle and connection pooling differently.
 process.on('SIGINT', async () => {
     console.log('SIGINT signal received: Attempting to close MongoDB connection.');
     await closeMongoDB();
@@ -871,9 +843,6 @@ process.on('SIGTERM', async () => {
 
 process.on('unhandledRejection', (reason, promise) => {
     console.error('Unhandled Rejection at:', promise, 'reason:', reason);
-    // In production, you might want to log this to an error tracking service
-    // rather than exiting immediately, as a single unhandled rejection
-    // shouldn't crash the entire serverless instance.
     if (process.env.NODE_ENV !== 'production') {
         process.exit(1);
     }
@@ -881,7 +850,6 @@ process.on('unhandledRejection', (reason, promise) => {
 
 process.on('uncaughtException', (error) => {
     console.error('Uncaught Exception:', error);
-    // Similar to unhandled rejections, handle gracefully in production.
     if (process.env.NODE_ENV !== 'production') {
         process.exit(1);
     }
