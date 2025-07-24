@@ -76,21 +76,15 @@ async function connectMongoDB() {
         const usersCollection = db.collection('users');
         await usersCollection.createIndex({ uid: 1 }, { unique: true });
         console.log("Ensured index on 'users' collection for 'uid'.");
+        // NEW: Indexes for status and role in users collection for filtering
+        await usersCollection.createIndex({ status: 1 });
+        console.log("Ensured index on 'users' collection for 'status'.");
+        await usersCollection.createIndex({ role: 1 });
+        console.log("Ensured index on 'users' collection for 'role'.");
+
 
         // MODIFIED: Add collation indexes for userReports collection search fields
         const userReportsCollection = db.collection('userReports');
-
-        // REMOVED: The problematic text index creation
-        // await userReportsCollection.createIndex({
-        //     name: "text",
-        //     facebookLink: "text",
-        //     phone: "text",
-        //     reason: "text",
-        //     reporterName: "text",
-        //     email: "text",
-        //     fbName: "text"
-        // }, { name: "search_text_index" });
-        // console.log("Removed text index creation for 'userReports' collection.");
 
         // Add individual indexes with collation for case-insensitive regex efficiency
         await userReportsCollection.createIndex({ name: 1 }, { collation: { locale: 'en', strength: 2 } });
@@ -105,6 +99,14 @@ async function connectMongoDB() {
         // Keep this one if you still filter by status
         await userReportsCollection.createIndex({ status: 1 });
         console.log("Ensured index on 'userReports' collection for 'status'.");
+
+        // New index for soft delete feature
+        await userReportsCollection.createIndex({ deletedAt: 1 });
+        console.log("Ensured index on 'userReports' collection for 'deletedAt'.");
+        // NEW: Index for deletedBy field
+        await userReportsCollection.createIndex({ deletedBy: 1 });
+        console.log("Ensured index on 'userReports' collection for 'deletedBy'.");
+
 
         await db.command({ ping: 1 });
         console.log("Pinged your deployment. You successfully connected to MongoDB!");
@@ -140,64 +142,107 @@ async function closeMongoDB() {
     }
 }
 
-// --- Helper function for paginated queries with optional search - UPDATED search and exclusion logic ---
-async function fetchPaginatedData(collectionName, baseQuery = {}, req, res) {
+// NEW: Middleware for general Firebase Auth Token Verification (any logged-in user)
+async function verifyAuthToken(req, res, next) {
+    const idToken = req.headers.authorization?.split('Bearer ')[1];
+
+    if (!idToken) {
+        return res.status(401).json({ message: 'Unauthorized: No authentication token provided.' });
+    }
+
+    try {
+        const decodedToken = await admin.auth().verifyIdToken(idToken);
+        req.user = decodedToken; // Attach decoded token to request for user's UID etc.
+        next();
+    } catch (error) {
+        console.error('Error verifying Firebase ID token:', error);
+        let errorMessage = 'Unauthorized: Invalid or expired token.';
+        if (error.code === 'auth/id-token-expired') {
+            errorMessage = 'Unauthorized: Authentication token expired. Please log in again.';
+        } else if (error.code === 'auth/argument-error') {
+            errorMessage = 'Unauthorized: Invalid authentication token.';
+        }
+        return res.status(401).json({ message: errorMessage });
+    }
+}
+
+
+// --- Helper function for paginated queries with optional search and dynamic filters ---
+// MODIFIED: Added dynamic query parameter handling for status and role
+async function fetchPaginatedData(collectionName, baseQuery = {}, req, res, includeDeleted = false) {
     // db is guaranteed to be connected by ensureDbConnected middleware
     try {
         const page = parseInt(req.query.page) || 1;
         const limit = parseInt(req.query.limit) || 25;
         const skip = (page - 1) * limit;
         const searchTerm = req.query.search;
+        const statusFilter = req.query.status; // Get status from query
+        const roleFilter = req.query.role;     // Get role from query
 
         const collection = db.collection(collectionName);
         let queryConditions = { ...baseQuery }; // Start with any base query conditions
 
+        // IMPORTANT: Exclude soft-deleted reports by default for regular views
+        if (collectionName === 'userReports') { // Only apply deletedAt filter to userReports
+            if (!includeDeleted) {
+                queryConditions.deletedAt = { $exists: false }; // Only include documents where deletedAt doesn't exist
+            } else {
+                queryConditions.deletedAt = { $exists: true }; // Only include documents where deletedAt exists (trashed items)
+            }
+        }
+
+        // Apply status filter if present in query
+        if (statusFilter) {
+            queryConditions.status = statusFilter;
+        }
+
+        // Apply role filter if present in query (supports comma-separated roles)
+        if (roleFilter) {
+            const roles = roleFilter.split(',').map(r => r.trim());
+            if (roles.length > 1) {
+                queryConditions.role = { $in: roles };
+            } else {
+                queryConditions.role = roles[0];
+            }
+        }
+
+
         if (searchTerm) {
             const searchRegex = new RegExp(searchTerm, 'i'); // Case-insensitive regex for search term
 
-            // 1. Search only 'name', 'facebookLink', 'phone'
-            const searchPart = {
-                $or: [
-                    { name: { $regex: searchRegex } },
-                    { facebookLink: { $regex: searchRegex } },
-                    { phone: { $regex: searchRegex } }
-                ]
-            };
+            // Define search fields based on collection type
+            let searchFields = [];
+            if (collectionName === 'userReports') {
+                searchFields = ['name', 'facebookLink', 'phone'];
+            } else if (collectionName === 'users') {
+                searchFields = ['email', 'fbName']; // Assuming users have email and fbName
+            }
 
-            // 2. Exclusion: name should not be equal to reporterName
+            if (searchFields.length > 0) {
+                const searchPart = {
+                    $or: searchFields.map(field => ({ [field]: { $regex: searchRegex } }))
+                };
+                // Combine existing queryConditions with searchPart
+                queryConditions = { $and: [queryConditions, searchPart] };
+            }
+        }
+
+        // Apply reporterName exclusion ONLY for userReports collection
+        if (collectionName === 'userReports' && searchTerm) { // Only apply this exclusion if there's a searchTerm for userReports
             const exclusionPart = {
                 $expr: {
                     $ne: ["$name", "$reporterName"] // $ne compares the values of the two fields
                 }
             };
-
-            // Combine all conditions using $and.
-            // This ensures that all criteria (baseQuery, search, AND exclusion) must be met.
-            if (Object.keys(queryConditions).length > 0) {
-                // If there's an existing baseQuery, combine it with search and exclusion
-                queryConditions = {
-                    $and: [
-                        queryConditions, // The initial base query (e.g., { status: 'suspended' })
-                        searchPart,      // The conditions for searching specific fields
-                        exclusionPart    // The condition for excluding name == reporterName
-                    ]
-                };
-            } else {
-                // If no baseQuery, just combine search and exclusion
-                queryConditions = {
-                    $and: [
-                        searchPart,
-                        exclusionPart
-                    ]
-                };
-            }
+            // Combine with existing queryConditions (which might already include searchPart)
+            queryConditions = { $and: [queryConditions, exclusionPart] };
         }
 
-        // console.log("Final Query:", JSON.stringify(queryConditions, null, 2)); // Uncomment this line for debugging the final query
 
         const totalCount = await collection.countDocuments(queryConditions);
 
         const data = await collection.find(queryConditions)
+            .sort({ timestamp: -1 }) // Sort by timestamp descending (newest first)
             .skip(skip)
             .limit(limit)
             .toArray();
@@ -217,7 +262,7 @@ async function fetchPaginatedData(collectionName, baseQuery = {}, req, res) {
 }
 
 // --- Middleware for Admin Token Verification and Role Check ---
-// MODIFIED: To use custom claims from Firebase token for role check, reducing DB calls
+// This middleware remains for admin-only routes
 async function verifyAdminToken(req, res, next) {
     const idToken = req.headers.authorization?.split('Bearer ')[1];
 
@@ -244,7 +289,6 @@ async function verifyAdminToken(req, res, next) {
         }
 
         // Fallback to database lookup if custom claims are not present or insufficient
-        // This is less performant but provides a robust fallback.
         console.warn("User role not found in custom claims or insufficient, performing database lookup for role verification.");
 
         // ensureDbConnected middleware already ensures db is connected here.
@@ -315,6 +359,7 @@ app.post('/api/userReports', ensureDbConnected, async (req, res) => {
             reporterId,
             reporterName,
             timestamp: new Date(),
+            // No deletedAt field initially, meaning it's an active report
         };
 
         const result = await userReportsCollection.insertOne(dataToSave);
@@ -334,46 +379,247 @@ app.post('/api/userReports', ensureDbConnected, async (req, res) => {
     }
 });
 
-app.delete('/api/userReports/:id', ensureDbConnected, async (req, res) => {
+// MODIFIED: Soft delete endpoint for user reports (ONLY FOR 'user' role)
+app.delete('/api/userReports/:id', ensureDbConnected, verifyAuthToken, async (req, res) => {
     try {
         const id = req.params.id;
+        const requestingUserUid = req.user.uid; // UID of the currently logged-in user
+
+        // NEW: Role check - only 'user' role can soft delete
+        const usersCollection = db.collection('users');
+        const userProfile = await usersCollection.findOne({ uid: requestingUserUid });
+
+        if (!userProfile || userProfile.role !== 'user') {
+            return res.status(403).json({ message: 'Access denied: Only regular users can move reports to trash.' });
+        }
 
         if (!ObjectId.isValid(id)) {
             return res.status(400).json({ message: 'Invalid ID format.' });
         }
 
         const userReportsCollection = db.collection('userReports');
-        const query = { _id: new ObjectId(id) };
+        const report = await userReportsCollection.findOne({ _id: new ObjectId(id) });
 
-        const result = await userReportsCollection.deleteOne(query);
+        if (!report) {
+            return res.status(404).json({ message: 'User report not found.' });
+        }
+
+        // IMPORTANT: Check if the requesting user is the reporter of this report
+        if (report.reporterId !== requestingUserUid) {
+            return res.status(403).json({ message: 'Access denied: You can only move your own reports to trash.' });
+        }
+
+        // --- THIS IS THE CRITICAL FIX: Ensure this uses updateOne, not deleteOne ---
+        const result = await userReportsCollection.updateOne(
+            { _id: new ObjectId(id) }, // Query by ID
+            {
+                $set: {
+                    deletedAt: new Date(), // Set the deletion timestamp
+                    deletedBy: requestingUserUid // Store the UID of the user who trashed it
+                }
+            }
+        );
+
+
+        if (result.matchedCount === 0) {
+            res.status(404).json({ message: 'User report not found or already trashed.' });
+        } else if (result.modifiedCount === 0) {
+            res.status(200).json({ message: 'User report was already in trash.' });
+        } else {
+            res.status(200).json({ message: 'User report moved to trash successfully.' });
+        }
+
+    } catch (error) {
+        console.error('Error soft-deleting user report:', error);
+        res.status(500).json({ message: 'Server error while soft-deleting user report.', error: error.message });
+    }
+});
+
+// NEW ROUTE: Permanent delete endpoint for user reports (ONLY FOR 'admin' or 'superadmin' role)
+app.delete('/api/admin/userReports/:id', ensureDbConnected, verifyAdminToken, async (req, res) => {
+    try {
+        const id = req.params.id;
+        const requestingUserRole = req.userProfile.role; // Role from verifyAdminToken middleware
+
+        // Role check - only 'admin' or 'superadmin' role can permanently delete
+        if (requestingUserRole !== 'admin' && requestingUserRole !== 'superadmin') {
+            return res.status(403).json({ message: 'Access denied: Only administrators can permanently delete reports.' });
+        }
+
+        if (!ObjectId.isValid(id)) {
+            return res.status(400).json({ message: 'Invalid ID format.' });
+        }
+
+        const userReportsCollection = db.collection('userReports');
+        
+        // Find the report to ensure it exists before attempting deletion
+        const report = await userReportsCollection.findOne({ _id: new ObjectId(id) });
+        if (!report) {
+            return res.status(404).json({ message: 'Report not found.' });
+        }
+
+        const result = await userReportsCollection.deleteOne({ _id: new ObjectId(id) });
 
         if (result.deletedCount === 1) {
-            res.status(200).json({ message: 'User report deleted successfully.' });
+            res.status(200).json({ message: 'Report permanently deleted successfully.' });
         } else {
-            res.status(404).json({ message: 'User report not found.' });
+            // This case should ideally not be reached if findOne found the report
+            res.status(404).json({ message: 'Report not found or already deleted.' });
         }
+
     } catch (error) {
-        console.error('Error deleting user report:', error);
-        res.status(500).json({ message: 'Server error while deleting user report.', error: error.message });
+        console.error('Error permanently deleting user report by admin:', error);
+        res.status(500).json({ message: 'Server error while permanently deleting user report.', error: error.message });
     }
 });
 
 
+// MODIFIED: Get active user reports (excluding soft-deleted ones)
 app.get('/api/userReports', ensureDbConnected, async (req, res) => {
-    await fetchPaginatedData('userReports', {}, req, res);
+    await fetchPaginatedData('userReports', { deletedAt: { $exists: false } }, req, res, false); // Explicitly exclude deleted
 });
 
 app.get('/api/suspendedUsers', ensureDbConnected, async (req, res) => {
-    await fetchPaginatedData('userReports', { status: 'suspended' }, req, res);
+    await fetchPaginatedData('userReports', { status: 'suspended', deletedAt: { $exists: false } }, req, res, false);
 });
 
 app.get('/api/bannedUsers', ensureDbConnected, async (req, res) => {
-    await fetchPaginatedData('userReports', { status: 'banned' }, req, res);
+    await fetchPaginatedData('userReports', { status: 'banned', deletedAt: { $exists: false } }, req, res, false);
 });
 
 app.get('/api/allUserReports', ensureDbConnected, async (req, res) => {
-    await fetchPaginatedData('userReports', {}, req, res);
+    await fetchPaginatedData('userReports', { deletedAt: { $exists: false } }, req, res, false);
 });
+
+// NEW: Get trashed user reports (for admin review) - STILL ADMIN ONLY
+app.get('/api/trashedReports', ensureDbConnected, verifyAdminToken, async (req, res) => {
+    if (req.userProfile.role !== 'admin' && req.userProfile.role !== 'superadmin') {
+        return res.status(403).json({ message: 'Access denied: Only admins can view trashed reports.' });
+    }
+    // Fetch only reports that have been soft-deleted
+    await fetchPaginatedData('userReports', { deletedAt: { $exists: true } }, req, res, true);
+});
+
+// NEW: Endpoint to restore a trashed report (admin action) - STILL ADMIN ONLY
+app.patch('/api/trashedReports/:id/restore', ensureDbConnected, verifyAdminToken, async (req, res) => {
+    try {
+        if (req.userProfile.role !== 'admin' && req.userProfile.role !== 'superadmin') {
+            return res.status(403).json({ message: 'Access denied: Only admins can restore reports.' });
+        }
+
+        const id = req.params.id;
+        if (!ObjectId.isValid(id)) {
+            return res.status(400).json({ message: 'Invalid ID format.' });
+        }
+
+        const userReportsCollection = db.collection('userReports');
+        const query = { _id: new ObjectId(id), deletedAt: { $exists: true } }; // Ensure it's in trash
+
+        const result = await userReportsCollection.updateOne(
+            query,
+            {
+                $unset: { deletedAt: "", deletedBy: "" } // Remove deletedAt and deletedBy fields
+            }
+        );
+
+        if (result.matchedCount === 0) {
+            res.status(404).json({ message: 'Trashed report not found or already restored.' });
+        } else if (result.modifiedCount === 0) {
+            res.status(200).json({ message: 'Report was already restored or no changes made.' });
+        } else {
+            res.status(200).json({ message: 'Report restored successfully.' });
+        }
+    } catch (error) {
+        console.error('Error restoring trashed report:', error);
+        res.status(500).json({ message: 'Server error while restoring trashed report.', error: error.message });
+    }
+});
+
+// NEW: Endpoint to permanently delete a trashed report (admin action) - STILL ADMIN ONLY
+app.delete('/api/trashedReports/:id/permanent', ensureDbConnected, verifyAdminToken, async (req, res) => {
+    try {
+        if (req.userProfile.role !== 'admin' && req.userProfile.role !== 'superadmin') {
+            return res.status(403).json({ message: 'Access denied: Only admins can permanently delete reports.' });
+        }
+
+        const id = req.params.id;
+        if (!ObjectId.isValid(id)) {
+            return res.status(400).json({ message: 'Invalid ID format.' });
+        }
+
+        const userReportsCollection = db.collection('userReports');
+        const query = { _id: new ObjectId(id), deletedAt: { $exists: true } }; // Ensure it's in trash
+
+        const result = await userReportsCollection.deleteOne(query);
+
+        if (result.deletedCount === 1) {
+            res.status(200).json({ message: 'Report permanently deleted from trash.' });
+        } else {
+            res.status(404).json({ message: 'Trashed report not found.' });
+        }
+    } catch (error) {
+        console.error('Error permanently deleting trashed report:', error);
+        res.status(500).json({ message: 'Server error while permanently deleting trashed report.', error: error.message });
+    }
+});
+
+// NEW: Bulk action endpoint for trashed reports (admin action) - STILL ADMIN ONLY
+app.post('/api/trashedReports/bulk-action', ensureDbConnected, verifyAdminToken, async (req, res) => {
+    try {
+        if (req.userProfile.role !== 'admin' && req.userProfile.role !== 'superadmin') {
+            return res.status(403).json({ message: 'Access denied: Only admins can perform bulk actions on reports.' });
+        }
+
+        const { ids, action } = req.body; // action can be 'restore' or 'permanent_delete'
+
+        if (!Array.isArray(ids) || ids.length === 0) {
+            return res.status(400).json({ message: 'Invalid or empty array of IDs provided.' });
+        }
+
+        if (!['restore', 'permanent_delete'].includes(action)) {
+            return res.status(400).json({ message: 'Invalid action specified. Must be "restore" or "permanent_delete".' });
+        }
+
+        const objectIds = ids.map(id => {
+            if (!ObjectId.isValid(id)) {
+                // Return null for invalid IDs to filter them out later
+                console.warn(`Invalid ObjectId in bulk action: ${id}`);
+                return null;
+            }
+            return new ObjectId(id);
+        }).filter(id => id !== null); // Filter out any nulls from invalid IDs
+
+        if (objectIds.length === 0) {
+            return res.status(400).json({ message: 'No valid IDs found in the request for bulk action.' });
+        }
+
+        const userReportsCollection = db.collection('userReports');
+        let result;
+
+        if (action === 'restore') {
+            result = await userReportsCollection.updateMany(
+                { _id: { $in: objectIds }, deletedAt: { $exists: true } },
+                { $unset: { deletedAt: "", deletedBy: "" } }
+            );
+            res.status(200).json({
+                message: `${result.modifiedCount} reports restored successfully.`,
+                restoredCount: result.modifiedCount
+            });
+        } else if (action === 'permanent_delete') {
+            result = await userReportsCollection.deleteMany(
+                { _id: { $in: objectIds }, deletedAt: { $exists: true } }
+            );
+            res.status(200).json({
+                message: `${result.deletedCount} reports permanently deleted.`,
+                deletedCount: result.deletedCount
+            });
+        }
+    } catch (error) {
+        console.error('Error performing bulk action on trashed reports:', error);
+        res.status(500).json({ message: 'Server error while performing bulk action.', error: error.message });
+    }
+});
+
 
 // --- User Profiles Routes (for Registration and Login Checks) ---
 
@@ -429,7 +675,6 @@ app.get('/api/users/:uid', ensureDbConnected, async (req, res) => {
         const usersCollection = db.collection('users');
         const uid = req.params.uid;
 
-        const user = await usersCollection.findOne({ uid: uid });
 
         if (user) {
             res.status(200).json(user);
@@ -446,7 +691,9 @@ app.get('/api/users/:uid', ensureDbConnected, async (req, res) => {
 // --- ADMIN-SPECIFIC ROUTES (Protected by verifyAdminToken) ---
 
 // GET /api/users - Get ALL user profiles (for admin panel display)
+// MODIFIED: This route now dynamically filters by status and role from query parameters
 app.get('/api/users', ensureDbConnected, verifyAdminToken, async (req, res) => {
+    // fetchPaginatedData will now pick up status and role from req.query
     await fetchPaginatedData('users', {}, req, res);
 });
 
